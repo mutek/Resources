@@ -1,0 +1,366 @@
+ Insufficiently known POSIX shell features
+
+I've seen several articles in the past with titles like "Top 10 things you didn't know about bash programming." These articles are disappointing on two levels: first of all, the tricks are almost always things I already knew. And secondly, if you want to write portable programs, you can't depend on bash features (not every platform has bash!). POSIX-like shells, however, are much more widespread.1
+
+Since writing redo, I've had a chance to start writing a few more shell scripts that aim for maximum portability, and from there, I've learned some really cool tricks that I haven't seen documented elsewhere. Here are a few.
+
+Update 2011/02/28: Just to emphasize, all the tricks below work in every POSIX shell I know of. None of them are bashisms.
+
+1. Removing prefixes and suffixes
+
+This is a super common requirement. For example, given a *.c filename, you want to turn it into a *.o. This is easy in sh:
+
+	SRC=/path/to/foo.c
+	OBJ=${SRC%.c}.o
+
+You might also try OBJ=$(basename $SRC .c).o, but this has an annoying side effect: it *also* removes the /path/to part. Sometimes you want to do that, but sometimes you don't. It's also more typing.
+
+(Update 2011/02/28: Note that the above $() syntax, as an alternative to nesting, is also valid POSIX and works in every halfway modern shell. I use it all the time. Backquotes get really ugly as soon as you need to nest them.)
+
+Speaking of removing those paths, you can use this feature to strip prefixes too:
+
+	SRC=/path/to/foo.c
+	BASE=${SRC##*/}
+	DIR=${SRC%"$BASE"}
+
+Update 2011/03/23: Added quotes around $BASE in the third line at someone's suggestion. Otherwise it's subject to the same wildcard string expansion as in the second line, which is probably not what you want when $BASE contains weird characters. (Note: this is not filename wildcard expansion, it's just string expansion.)
+
+These are cheap (ie. non-forking!) alternatives to the basename and dirname commands. The nice thing about not forking is they run much faster, especially on Windows where fork/exec is ridiculously expensive and should be avoided at all costs.
+
+(Note that these are not quite the same as dirname and basename. For example, "dirname foo" will return ".", but the above would set DIR to the empty string instead of ".". You might want to write a dirname function that's a little more careful.)
+
+Some notes about the #/% syntax:
+
+    The thing you're stripping is a shell glob, not a regex. So "*", not ".*"
+    bash has a handy regex version of this, but we're not talking about bashisms here :)
+    The part you want to remove can include shell variables (using $).
+    Unfortunately the part you're removing *from* has to be just a variable name, so you might have to strip things in a few steps. In particular, removing prefixes *and* suffixes from one string is a two step process.
+    ##/%% mean "the longest matching prefix/suffix" and #/% mean "the shortest matching prefix/suffix." So to remove the *first* directory only, you could use SUB=${SRC#*/}.
+
+2. Default values for variables
+
+There are several different substitution modes for variables that don't contain values. They come in two flavours: assignment and substitution, as well as two rules: empty string vs. unassigned variable. It's easiest to show with an example:
+
+	unset a b c d
+	e= f= g= h=
+	
+	# prints 1 2 3 4 6 8
+	echo ${a-1} ${b:-2} ${c=3} ${d:=4} ${e-5} ${f:-6} ${g=7} ${h:=8}
+	
+	# prints 3 4 8
+	echo $a $b $c $d $e $f $g $h
+
+The "-" flavours are a one-shot substitution; they don't change the variable itself. The "=" flavours reassign the variable if the substitution takes effect. (You can see the difference by what shows in the second echo statement compared to the first.)
+
+The ":" rules affect both unassigned ("null") variables and empty ("") variables; the non-":" rules affect only unassigned variables, but not empty ones. As far as I can tell, this is virtually the only time the shell cares about the difference between the two.
+
+Personally, I think it's *almost* always wrong to treat empty strings differently from unset ones, so I recommend using the ":" rules almost all the time.
+
+I also think it makes sense to express your defaults once at the top instead of every single time - since in the latter case if you change your default, you'll have to change your code in 25 places - so I recommend using := instead of :- almost all the time.
+
+If you're going to do that, I also recommend this little syntax trick for assigning your defaults exactly once at the top:
+
+	: ${CC:=gcc} ${CXX:=g++}
+	: ${CFLAGS:=-O -Wall -g}
+	: ${FILES:="
+		f1
+		f2
+		f3
+	"}
+
+Update 2011/03/23: Someone points out that some versions of ash/dash and FreeBSD sh require quotes around the argument when it involves newlines, as in the third line above. POSIX says it should work without the quotes, but that's no use to you if common shells can't do it. So you should use the quotes in this case.
+
+The trick here is the ":" command, a shell builtin that never does anything and throws away all its parameters. I find this trick to be a little more readable and certainly less repetitive than:
+
+	[ -z "$CC" ] || CC=gcc
+	[ -z "$CXX" ] || CXX=g++
+	[ -z "$CFLAGS" ] || CFLAGS="-O -Wall -g"
+	[ -z "$FILES" ] || FILES="
+		f1
+		f2
+		f3
+	"
+
+3. You can assign one variable to another without quoting
+
+It turns out that these two statements are identical:
+
+	a=$b
+	a="$b"
+
+...even if $b contains characters like spaces, wildcards, or quotes. For whatever reason, the substitutions in a variable assignment aren't subject to further expansion, which turns out to be exactly what you want. If $b was "chicken ls" you wouldn't really want the meaning of "a=$b" to be "a=chicken; ls". So luckily, it isn't.
+
+If you've been quoting all your variable-to-variable assignments, you can take out the quotes now. By the way, more complex assignments like "a=$b$c" are also safe.
+
+Update 2011/03/23: A few people have brought up assignments of $* and $@ as special cases here. From what I can tell, this works in all modern shells:
+
+	x=$*
+
+However, assigning $@ to a variable is unspecified and it doesn't do anything consistent. But that's okay, because it's meaningless as a variable assignment (since $@ is not a normal variable); use $* if you want to assign it.
+
+4. Local vs. global variables
+
+In early sh, all variables were global. That is, if you set a variable inside a shell function, it would be visible inside the calling function. For backward compatibility, this behaviour persists today. And from what I've heard, POSIX actually doesn't specify any other behaviour.
+
+However, every single POSIX-compliant shell I've tested implements the 'local' keyword, which lets you declare variables that won't be returned from the current function. So nowadays you can safely count on it working. Here's an example of the standard variable scoping:
+
+	func()
+	{
+		X=5
+		local Y=6
+	}
+	X=1
+	Y=2
+	(func)
+	echo $X $Y  # returns 1 2; parens throw away changes
+	func
+	echo $X $Y  # returns 5 2; X was assigned globally
+
+Don't be afraid of the 'local' keyword. Pre-POSIX shells might not have had it, but every modern shell now does.
+
+(Note: stock ksh93 doesn't seem to have the 'local' keyword, at least on MacOS 10.6. But ksh differs from POSIX in lots of ways, and nobody can agree on even what "ksh" means. Avoid it.)
+
+5. Multi-valued and temporary exports, locals, assignments
+
+For historical reasons, some people are afraid of mixing "export" with assignment, or putting multiple exports on one line. I've tested a lot of shells, and I can safely tell you that if your shell is basically POSIX compliant, then it supports syntax like these:
+
+	export PATH="$PATH:/home/bob/bin" CHICKEN=5
+	local A=5 B=6 C="$PATH"
+	A=1 B=2
+	
+	# sets GIT_DIR only while 'git log' runs
+	GIT_DIR=$PWD/.githome git log
+
+Update 2011/03/23: Someone pointed out that 'export' and 'local' commands are not like plain variable assignment; you do need to be careful about quoting, so I've added quotes above.
+
+Update 2011/03/23: Someone points out that the last example, temporary variable assignment, doesn't work if the command you're calling is a shell function or builtin; the assignment becomes permanent instead. It's unfortunate behaviour, but shells seems to at least be consistent about it.
+
+6. Multi-valued function returns
+
+You might think it's crazy that variable assignments by default leak out of the function where you assigned them. But it can be useful too. Normally, shell functions can only return one string: their stdout, which you capture like this:
+
+	X=$(func)
+
+But sometimes you really want to get *two* values out. Don't be afraid to use globals to accomplish this:
+
+	getXY()
+	{
+		X=$1
+		Y=$2
+	}
+	
+	test()
+	{
+		local X Y
+		getXY 7 8
+		echo $X-$Y
+	}
+	
+	X=1 Y=2
+	test        # prints 7-8
+	echo $X $Y  # prints 1-2
+
+Did you catch that? If you run 'local X Y' in a calling function, then when a subfunction assigns them "globally", it still only affects your local ones, not the global ones.
+
+7. Avoiding 'set -e'
+
+The set -e command tells your shell to die if a function returns nonzero in certain contexts. Unfortunately, set -e *does* seem to be implemented slightly differently between different POSIX-compliant shells. The variations are usually only in weird edge cases, but it's sometimes not what you want. Moreover, "silently abort when something goes wrong" isn't always the goal. Here's a trick I learned from studying the git source code:
+
+	cd foo &&
+	make &&
+	cat chicken >file &&
+	[ -s file ] ||
+	die "resulting file should have nonzero length"
+
+(Of course you'll have to define the "die" function to do what you want, but that's easy.)
+
+This is treating the "&&" and "||" (and even "|" if you want) like different kinds of statement terminators instead of statement separators. So you don't indent lines after the first one any further, because they're not really related to the first line; the && terminator is a statement flow control, not a way to extend the statement. It's like terminating a statement with a ; or & - each type of terminator has a different effect on program flow. See what I mean?
+
+It takes a little getting used to, but once you start writing like this, your shell code starts getting a lot more readable. Before seeing this style, I would tend to over-indent my code, which actually made it worse instead of better.
+
+By the way, take special note of the way we used the higher precedence of && vs. || here. All the && statements clump together, so that if *any* of them fail, we fall back to the other side of the || and die.
+
+Oh, as an added bonus, you can use this technique even if set -e is in effect: capturing the return value using && or || causes set -e to *not* abort. So this works:
+
+	set -e
+	mv file1 file2 || true
+	echo "we always run this line"
+
+Even if the 'mv' command fails, the program doesn't abort. (Because this technique is available, redo always runs all its scripts with set -e active so it can be more like make. If you don't like it, you can simply catch any "expected errors" as above.)
+
+8. printf as an alternative to echo
+
+The "echo" command is chronically underspecified by POSIX. It's okay for simple stuff, but you never know if it'll interpret a word starting with dash (like -n or -c) as an option or just print it out. And ash/dash/busybox/ksh, for example, have a weird "feature" where echo interprets "echo \n" as a command to print a newline. Which is fun, except other shells don't do that. (zsh does, in zsh mode, but not in sh mode.) The others all just print backslash followed by n. (Update 2011/02/28: changed list of which shells do what with \n.)
+
+There's good news, though! It turns out the "printf" command is available everywhere nowadays, and its semantics are much more predictable. Of course, you shouldn't write this:
+
+	# DANGER!  See below!
+	printf "path to foo: $PATH_TO_FOO\n"
+
+Because $PATH_TO_FOO might contain variables like %s, which would confuse printf. But you *can* write your own version of echo that works just how you like!
+
+	echo()
+	{
+		# remove this line if you don't want to support "-n"
+		[ "$1" = -n ] && { shift; FMT="%s"; } || FMT="%s\n"
+		printf "$FMT" "$*"
+	}
+
+9. The "read" command is crazier than you think
+
+This is both good news and bad news. The "read" command actually mangles its input pretty severely. It seems the "-r" option (which turns off the mangling) is supported on all the shells that I've tried, but I haven't been able to find a straight answer on this one; I don't think -r is POSIX. But if everyone supports it, maybe it doesn't matter. (Update 2011/02/28: yes, it's POSIX. Thanks to Alex Bradbury for the link.)
+
+The good news is that the mangling behaviour gives you a lot of power, as long as you actually understand it. For example, given this input file, testy.d (produced by gcc -MD -c testy.c):
+
+	testy.o: testy.c /usr/include/stdio.h /usr/include/features.h \
+	  /usr/include/sys/cdefs.h /usr/include/bits/wordsize.h \
+	  /usr/include/gnu/stubs.h /usr/include/gnu/stubs-32.h \
+	  /usr/lib/gcc/i486-linux-gnu/4.3.2/include/stddef.h \
+	  /usr/include/bits/types.h /usr/include/bits/typesizes.h \
+	  /usr/include/libio.h /usr/include/_G_config.h
+	  /usr/include/wchar.h \
+	  /usr/lib/gcc/i486-linux-gnu/4.3.2/include/stdarg.h \
+	  /usr/include/bits/stdio_lim.h \
+	  /usr/include/bits/sys_errlist.h
+
+You can actually read all that content like this:
+
+	read CONTENT <testy.d
+
+...because the 'read' command understands backslash escapes! It removes the backslashes and joins all the lines into a single line, just like the file intended.
+
+And then you can get a raw list of the dependencies by removing the target filename from the start:
+
+	DEPS=${CONTENT#*:}
+
+Until I discovered this feature, I thought you had to run the file through sed to get rid of all the extra junk - and that's one or more extra fork/execs for every single run of gcc. With this method, there's no fork/exec necessary at all, so your autodependency mechanism doesn't have to slow things down.
+
+10. Reading/assigning a variable named by another variable
+
+Say you have a variable $1 that contains the name of another variable, say BOO, and you want to read the variable pointed to by $1, then do a calculation, then write back to it. The simplest form of this is an append operation. You *can't* just do this:
+
+	# Doesn't work!
+	$V="$$V appended stuff"
+
+...because "$$V" is actually "$$" (the current process id) followed by "V". Also, even this doesn't work:
+
+	# Also doesn't work!
+	$V=50
+
+...because the shell assumes that after substitution, the result is a command name, not an assignment, so it tries to run a program called "BOO=50".
+
+The secret is the magical 'eval' command, which has a few gotchas, but if you know how to use it exactly right, then it's perfect.
+
+	append()
+	{
+		eval local tmp=\$$1
+		tmp="$tmp $2"
+		eval $1=\$tmp
+	}
+	
+	BOO="first bit"
+	append BOO "second bit"
+	echo "$BOO"
+
+The magic is all about where you put the backslashes. You need to do some of the $ substitutions - like replacing "$1" with "BOO" - before calling eval on the literal '$BOO'. In the second eval, we want $1 to be replaced with "BOO" before running eval, but '$tmp' is a literal string parsed by the eval, so that we don't have to worry about shell quoting rules.
+
+In short, if you're sending an arbitrary string into an eval, do it by setting a variable and then using \$varname, rather than by expanding that variable outside the eval. The only exception is for tricks like assigning to dynamic variables - but then the variable name should be controlled by the calling function, who is presumably not trying to screw you with quoting rules.
+
+Update 2011/02/28: someone on reddit complained that the above code uses quoting incorrectly and is insecure. It isn't, assuming the first parameter to append() is a real variable name that doesn't contain spaces and control characters. This is a fair assumption, as long as you the programmer are the one providing that string. If not, you have a security hole, exactly as if you allowed a user to provide the format string to printf. Don't do that then! Conversely, the *second* parameter to append is completely safe no matter what it contains. That's the one you'd expect to let users provide. So I really don't understand the security complaints here.
+
+All that said, do be very very careful with eval. If you don't know what you're doing, you can hurt yourself.
+
+11. "read" multiple times from a single input file
+
+This problem is one of the great annoyances of shell programming. You might be tempted to try this:
+
+	(read x; read y) <myfile
+
+But it doesn't work; the subshell eats the variable definitions. The following does work, however, because {} blocks aren't subshells, they're just blocks:
+
+	{ read x; read y; } <myfile
+
+Unfortunately, the trick doesn't work with pipelines:
+
+	ls | { read x; read y; }
+
+Because every sub-part of a pipeline is implicitly a subshell whether it's inside () or not, so variable assignments get lost.
+
+Update 2011/03/23: Someone adds that you can't *depend* on this not working; in some shells, the above command will actually assign x and y as you want. But it doesn't work in *most* shells, so don't do it.
+
+A temp file is always an option:
+
+	ls >tmpfile
+	{ read x; read y; } <tmpfile
+	rm -f tmpfile
+
+But temp files seem rather inelegant, especially since there's no standard way to make well-named temp files in sh. (The mktemp command is getting popular and even appears in busybox nowadays, but it's not everywhere yet.)
+
+Update 2011/02/28: andresp on reddit contributed a better suggestion than the following crazy one! See below.
+
+Alternatively you can capture the entire output to a variable:
+
+	tmp=$(ls)
+
+But then you have to break it into lines the hard way (using the eval trick from above):
+
+	nextline()
+	{
+		local INV=$1 OUTV=$2
+		eval local IN=\$$INV
+		
+		local IFS=""
+		local newline=$(printf "\nX") 
+		newline=${newline%X}
+		
+		[ -z "$IN" ] && return 1
+		local rest=${IN#*$newline}
+		if [ "$rest" = "$IN" ]; then
+			# no more newlines; return remainder
+			eval $INV= $OUTV=\$rest
+		else
+			local OUT=${IN%$rest}
+			OUT=${OUT%$newline}
+			eval $INV=\$rest $OUTV=\$OUT
+		fi
+	}
+	
+	tmp=$(echo "hello 1"; echo "hello 2")
+	nextline tmp x
+	nextline tmp y
+	echo "$x-$y"  # prints "hello 1-hello 2"
+
+Okay, that's a little ugly. But it works, and you can steal the nextline function and never have to look at it again :) You could also generalize it into a "split" function that can split on any arbitrary separator string. Or maybe someone has a cleaner suggestion?
+
+Update 2011/02/28: andresp on reddit suggests doing this instead. It works!
+
+	{ read x; read y; } <<EOF
+	$(ls)
+	EOF
+
+Parting Comments
+
+I just want to say that sh is a real programming language. When you're writing shell scripts, try to think of them as programs. That means don't use insane indentation; write functions instead of spaghetti; spend some extra time learning the features of your language. The more you know, the better your scripts will be.
+
+When early versions of git were released, they were mostly shell scripts. Large parts of git (like 'git rebase') still are. You can write serious code in shell, as long as you treat it like real programming.
+
+autoconf scripts are some of the most hideous shell code imaginable, and I'm a bit afraid that a lot of people nowadays use them to learn how to program in sh. Don't use autoconf as an example of good sh programming! autoconf has two huge things working against it:
+
+    It was designed about 20 years ago, *long* before POSIX was commonly available, so they avoid using really critical stuff like functions. Imagine trying to write a readable program without ever breaking it into functions!
+    Because of that, their scripts are generated by macro expansion (a poor man's functions), so ./configure is more like compiler output than something any real programmer would write.
+
+autoconf solves a lot of problems that have not yet been solved any other way, but it comes with a lot of historical baggage and it leaves a bit of a broken window effect. Please try to hold your shell code to a higher standard, for the good of all of us. Thanks.
+
+Bonus: What shell should I use?
+
+Update 2011/02/28: A strangely large number of people seem to think this article is recommending that you use bash for some reason. I like bash, it's a good shell. But the whole point of this article is exactly the opposite: that *any* POSIX shell can do a bunch of good things (like everything listed here), and you should *avoid* using bash-specific features.
+
+If you want to help yourself avoid portability problems, I recommend using ash, dash, or busybox (which are all variants of the 'ash' shell) in your scripts. They're deliberately minimalist shells that try not to have any extra nonstandard features. So if it works in dash, it probably works in most other POSIX shells too. Conversely, if you test in bash, you'll probably accidentally use at least one bashism that makes your script incompatible with other shells. (The most common bashism is to use "==" instead of "=" in comparisons. Only the latter is in POSIX.)
+
+Footnote
+
+1 Of course, finding a shell with POSIX compliance is rather nebulous. The reason autoconf 'configure' scripts are so nasty, for example, is that they didn't want to depend on the existence of a POSIX-compliant shell back in 1992. On many platforms, /bin/sh is anything but POSIX compliant; you have to pick some other shell. But how? It's a tough problem. redo tests your locally-installed shells and picks one that's a good match, then runs it in "sh mode" for maximum compatibility. It's very refreshing to just be allowed to use all the POSIX sh features without worrying. By the way, if you want a portable trying-to-be-POSIX shell, try dash, or busybox, which includes a variant of dash. On *really* ancient Unixes without a POSIX shell, it makes much more sense to just install bash or dash than to forever write all your scripts to assume it doesn't exist.
+
+"But what about Windows?" I can hear you asking. Well, of course you already know about Cygwin and MSys, which both have free ports of bash to Windows. But if you know about them, you probably also know that they're gross: huge painful installation processes, messing with your $PATH, incompatible with each other, etc. My preference is the busybox-w32 (busybox-win32) project, which is a single 500k .exe file with an ash/dash-derived POSIX-like shell and a bunch of standard Unix utilities, all built in. It still has a few bugs, but if we all help out a little, it could be a great answer for shell scripting on Windows machines.
+
+March 23, 2011 22:22 

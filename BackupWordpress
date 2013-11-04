@@ -1,0 +1,142 @@
+#!/usr/bin/env sh
+#
+# BackupWordpress
+#
+# mutek (2013)
+#
+# <mutek@riseup.net>
+#
+# Public Domain
+#
+# all rights released
+#
+#
+# TODO: aggiungere encryption simmetrico semplice per favorire il trasporto fuori dal server in ambiente gia full trusted
+# openssl aes-256-cbc -salt -in $EPOCA.tar.bz2 -out $EPOCA.tarbz2..aes -k LA_PWD
+#
+# reminder decrypt per chi riceve:
+# openssl aes-256-cbc -d -salt -in $EPOCA.tar.bz2.aes -out $EPOCA.tar.bz2
+# la password richiesta è LA_PWD inserita precedentemente
+
+SomethingYouKnow=XXXXXXXXXXXXX
+
+EPOCA="$(date +%s)"
+
+PRIORITA=19
+
+### FASE 1 - GIOCA FUORI CASA -
+cd /var/www
+
+nice -n $PRIORITA git add .
+wait
+
+nice -n $PRIORITA git commit -m "$EPOCA"
+wait
+
+
+### FASE 2 - GIOCA IN CASA -
+
+[ ! -d /opt/Casa ] && mkdir -p /opt/Casa && chown www-data:www-data /opt/Casa
+wait
+
+cd /opt/Casa
+
+mkdir -p $EPOCA
+wait
+
+cd $EPOCA
+
+# Dump SQL 
+
+nice -n $PRIORITA mysqldump -u wordpress -p$SomethingYouKnow wp > WordPress.$EPOCA.sql || exit 1
+wait
+
+chmod 755 WordPress.$EPOCA.sql
+wait
+
+sha512sum WordPress.$EPOCA.sql > WordPress.$EPOCA.sql.sha512sum
+wait
+
+
+# Dump WWW via git con shallow clones per sfruttare solo tutto il buono di git anche in una semplice copia
+
+nice -n $PRIORITA git clone file:///var/www --depth 1
+wait
+
+cd www
+nice -n $PRIORITA rm -r --preserve-root .git
+wait
+
+cd ..
+
+
+chown -R www-data:www-data www
+wait
+
+cd ..
+
+nice -n $PRIORITA tar -jcvf $EPOCA.tar.bz2 $EPOCA || exit 1
+wait
+
+sha512sum $EPOCA.tar.bz2 > $EPOCA.tar.bz2.sha512sum
+wait
+
+nice -n $PRIORITA rm -r --preserve-root $EPOCA
+wait
+
+
+########
+#
+# TOFIX
+########
+#CHIAVE=XXXXXXXXXXXXXXXXXXXXXXXXXXXXXX
+#wait
+
+#openssl aes-256-cbc -salt -in $EPOCA.tar.bz2 -out $EPOCA.tar.bz2.aes-256-cbc -k $CHIAVE
+#wait
+#sha512sum $EPOCA.tar.bz2.aes-256-cbc
+#wait
+
+### VERIFICA TUTTO PRIMA DI ELIMINARE IL BACKUP APPENA COSTRUITO
+###
+### INTERVENTO UMANO PER RESPONSABILIZZAZIONE?
+###
+### ANCHE NO....
+
+# decrypt in local tmp
+# verifica fingerprint
+# distruggi il local tmp
+
+#mkdir -p $EPOCA.tmp
+#wait
+
+#cd $EPOCA.tmp
+
+#openssl aes-256-cbc -d -salt -in ../$EPOCA.tar.bz2.aes-256-cbc -out $EPOCA.tar.bz2 -k $CHIAVE
+#wait
+
+#sha512sum $EPOCA.tar.bz2 > $EPOCA.tar.bz2.sha512sum
+#wait
+
+#IMPRONTA="$(cat $EPOCA.tar.bz2.sha512sum | cut -d" " -f 1)"
+
+#if [ "$CHIAVE" = "$IMPRONTA" ]
+#then
+
+#cd ..
+#rm -r --preserve-root $EPOCA.tmp
+#wait
+
+#unlink $EPOCA.tar.bz2
+
+#else
+
+#rm -r --preserve-root $EPOCA.tmp
+#wait
+
+#unlink $EPOCA.tar.bz2.aes-256-cbc
+#wait
+
+#echo "Errore nella verifica in Decrypt lascio senza cifrare" >> $EPOCA.error.log
+
+#fi
